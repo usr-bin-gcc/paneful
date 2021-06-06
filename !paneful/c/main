@@ -1,0 +1,412 @@
+/*******************************************************************************
+
+File        : c.main
+
+Date        : Saturday 5th June 2021
+
+Author      : Gavin Cawley
+
+Description : Part of a program to demonstrate how two wimp tasks can 
+              collaborate so that one program provides a pane for the window
+              of another wimp task.
+
+History     : 05/06/2021 - v1.00 adapted from !throwback
+
+*******************************************************************************/
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+                 
+#include "bbc.h"
+#include "wimp.h"
+#include "wimpt.h"
+#include "resspr.h"
+#include "baricon.h"
+#include "res.h"
+#include "event.h"
+#include "menu.h"
+#include "dbox.h"
+#include "werr.h"
+#include "win.h"
+#include "template.h"
+#include "font.h"
+#include "colourtran.h"
+#include "os.h"
+   
+#define APP_NAME "Paneful"
+#define MENU_ITEMS ">Info,Quit"
+                    
+#define IMENU_INFO 1
+#define IMENU_QUIT 2
+
+menu imenu;
+                        
+wimp_w gui_handle, pane_handle = 0;
+
+wimp_t task_handle, pane_task_handle = 0;
+
+wimp_i icon_handle = 0;
+
+
+/*******************************************************************************
+
+Function    : findTask
+
+Parameters  : char* - name of the task
+
+Returns     : int - task handle of named task
+
+Description : This function interrogates the task manager to find the task
+              handle of a named task.  A return value of zero indicates that 
+              the named task was not found.
+
+*******************************************************************************/
+
+#define TaskManager_EnumerateTasks 0x42681
+
+wimp_t findTask(char *task)
+{
+   int buffer[16];
+
+   os_regset regs;
+
+   regs.r[0] = 0;
+                         
+   do
+   { 
+      regs.r[1] = (int)&buffer;
+      regs.r[2] = 64;
+
+      wimpt_complain(os_swix(TaskManager_EnumerateTasks, &regs));
+
+      for (int *block = buffer; block < (int*)regs.r[1]; block += 4)
+      {                               
+         if (strcmp(task, (char*)block[1]) == 0)
+         {
+            return block[0];
+         }
+      }  
+   }
+   while (regs.r[0] >= 0);
+
+   return 0;
+}
+
+void gui_mouse_click_handler(wimp_mousestr *ms, wimp_bbits mbits)
+{ 
+   if (ms->i == icon_handle)
+   {
+      wimp_icon info;
+
+      wimp_get_icon_info(gui_handle, icon_handle, &info);
+
+      char *str = info.data.indirecttext.buffer;
+                                        
+      if (str[1] == 'a')
+      {
+         strcpy(str, "Play");
+      }                     
+      else
+      {
+         strcpy(str, "Pause");
+      }
+
+      if (pane_handle != 0)
+      {
+         wimp_msgstr msg;
+ 
+         msg.hdr.size      = 256;
+         msg.hdr.your_ref  = 0;
+         msg.hdr.action    = (wimp_msgaction)0xFACE;
+         msg.data.words[0] = str[1];
+
+         wimp_sendmessage(wimp_ESEND, &msg, pane_task_handle);
+      }
+   }    
+}
+
+void gui_open(wimp_openstr *openstr)
+{  
+   // open the dialog box at the appropriate level
+
+   wimpt_noerr(wimp_open_wind(openstr));         
+               
+   if (pane_handle != 0)
+   {
+      // open the pane at that level                       
+   
+      wimp_wstate p_state;
+
+      if (wimpt_complain(wimp_get_wind_state(pane_handle, &p_state)) == 0)
+      {
+         p_state.o.behind = openstr->behind;     
+
+         // place the pane relatve to the visible area of the dialog box
+                                              
+         p_state.o.box.x0 = openstr->box.x0 + 48;
+         p_state.o.box.y0 = openstr->box.y0 + 48 + 40 + 100;
+         p_state.o.box.x1 = openstr->box.x1 - 48 - 40;
+         p_state.o.box.y1 = openstr->box.y1 - 48;       
+       
+         wimpt_noerr(wimp_open_wind(&p_state.o));
+      }
+            
+      // re-open dialog box undeneath the pane
+                                        
+      openstr->behind = pane_handle;
+      wimpt_noerr(wimp_open_wind(openstr));
+   }
+}
+
+void gui_eventHandler(wimp_eventstr *e, void *handle)
+{
+   switch(e->e)
+   {
+      case wimp_EOPEN:   // maximise or minimise window 
+      {
+         gui_open(&(e->data.o));
+         
+         break;
+      }
+      case wimp_ECLOSE:   // close window
+      {
+         wimpt_noerr(wimp_close_wind(e->data.o.w));
+ 
+         if (pane_handle != 0)
+         {
+            wimpt_noerr(wimp_close_wind(pane_handle));
+         }
+
+         break;
+      }
+      case wimp_EBUT:   // mouse button change
+      {                                      
+         gui_mouse_click_handler(&(e->data.but.m), e->data.but.b);
+
+         break;
+      }
+   }
+}
+           
+void gui_create(void)
+{                        
+   wimp_wind *window = template_syshandle("Window");
+
+   if (window == 0)
+   {
+      exit(EXIT_FAILURE);
+   }
+
+   if (wimpt_complain(wimp_create_wind(window, &gui_handle)) != 0)
+   {
+      exit(EXIT_FAILURE);
+   }
+
+   win_register_event_handler(gui_handle, gui_eventHandler, 0);
+
+   pane_task_handle = findTask("Animation");
+
+   if (pane_task_handle != 0)
+   {
+      wimp_msgstr msg;
+
+      msg.hdr.size     = 256;
+      msg.hdr.your_ref = 0;
+      msg.hdr.action   = (wimp_msgaction)0xBEEF;
+
+      wimp_sendmessage(wimp_ESEND, &msg, pane_task_handle);
+   }
+}
+
+void gui_closeDown(void)
+{  
+   if (pane_handle != 0)
+   {                     
+      wimpt_noerr(wimp_close_wind(pane_handle));
+   }
+}
+
+static void info_about(void)
+{
+   dbox d = dbox_new("ProgInfo");
+
+   if (d != NULL)
+   {
+      dbox_show(d);        
+      dbox_fillin(d);       
+      dbox_dispose(&d);     
+   }
+}
+
+static menu ipremenuproc(void *handle)
+{
+   return imenu;
+}
+
+static void imenuproc(void *handle, char *hit)
+{
+   switch (hit[0])  
+   {                
+      case IMENU_INFO:
+      {
+         info_about();
+
+         break;
+      }
+      case IMENU_QUIT:
+      {         
+         gui_closeDown();
+
+         exit(EXIT_SUCCESS);
+      }
+   }
+}
+
+static void icon_left_click(wimp_i icon)
+{
+   wimp_wstate win_state;
+
+   wimpt_complain(wimp_get_wind_state(gui_handle, &win_state));
+
+   gui_open(&(win_state.o));
+}
+
+/*******************************************************************************
+
+Function    : messageEventProcessor
+
+Parameters  : wimp_eventstr* - pointer to struct describing the event
+              void*          - pointer to workspace (currently unused)
+
+Returns     : BOOL - TRUE if event fully handled, FALSE otherwise.
+
+Description : Task-level event processor.  In this case it responds to user
+              wimp messages sent by other tasks.
+
+*******************************************************************************/
+
+BOOL messageEventProcessor(wimp_eventstr *e, void *handle)
+{
+   if (e->e == wimp_ESEND || e->e == wimp_ESENDWANTACK || e->e == wimp_EACK)
+   {            
+      switch (e->data.msg.hdr.action)
+      {           
+         case 0xBEEF:
+         {
+            pane_handle = e->data.msg.data.words[0];
+
+            return TRUE;
+         }    
+         case 0xDEAD:
+         {
+            pane_handle      = 0;
+            pane_task_handle = 0;
+
+            return TRUE;
+         }       
+         case 0xD00D:
+         {   
+            wimp_openstr openstr;
+
+            openstr.behind = pane_handle;     
+            openstr.w      = gui_handle;
+
+            // place the window relatve to the pane
+                                              
+            openstr.box.x0 = e->data.msg.data.words[0] - 48;
+            openstr.box.y0 = e->data.msg.data.words[1] - 48 - 40 - 100;
+            openstr.box.x1 = e->data.msg.data.words[2] + 48 + 40;
+            openstr.box.y1 = e->data.msg.data.words[3] + 48; 
+                                  
+            // delete pause icon and replace relative to the window
+
+            wimp_icreate icon;
+                                                      
+            icon.w = gui_handle;                   
+
+            wimp_get_icon_info(gui_handle, icon_handle, &(icon.i));
+
+            wimp_delete_icon(gui_handle, icon_handle);
+
+            int width  = openstr.box.x1 - openstr.box.x0;
+            int height = openstr.box.y0 - openstr.box.y1;
+
+            icon.i.box.x0 = width/2 - 94;
+            icon.i.box.y0 = height  + 48;
+            icon.i.box.x1 = width/2 + 94;
+            icon.i.box.y1 = height  + 48 + 52;
+
+            wimp_create_icon(&icon, &icon_handle);
+
+            wimp_redrawstr r;
+
+            r.w      = gui_handle;
+            r.box.x0 = 0;                  // icon.i.box.x0 - 40;  ???
+            r.box.y0 = icon.i.box.y0 - 40;
+            r.box.x1 = icon.i.box.x1 + 40;
+            r.box.y1 = icon.i.box.y1 + 40;
+
+            wimp_force_redraw(&r);
+ 
+            // re-open the window      
+       
+            wimpt_complain(wimp_open_wind(&openstr));
+
+            return TRUE;
+         }              
+      }
+   }
+
+   return FALSE;
+}
+
+int main(void)
+{
+   // clear logfile
+ 
+   FILE *fd = fopen("<Paneful$Dir>.logfile", "w"); fclose(fd);
+                
+   wimpt_init(APP_NAME);
+
+   task_handle = wimpt_task();
+
+   res_init(APP_NAME);   
+
+   template_init();              
+
+   dbox_init();     
+
+   win_add_unknown_event_processor(messageEventProcessor, NULL);
+
+   gui_create();
+
+   baricon("!paneful", (int)resspr_area(), icon_left_click);
+
+   imenu = menu_new(APP_NAME, MENU_ITEMS);
+                    
+   if (imenu == NULL)
+   {
+      return EXIT_FAILURE;
+   }
+
+   if (!event_attachmenumaker(win_ICONBAR, ipremenuproc, imenuproc, 0))
+   {
+      return EXIT_FAILURE;
+   }                    
+
+   // main even processing loop
+
+   while (TRUE) 
+   {
+      event_process();
+   }
+                    
+   gui_closeDown();
+
+   wimp_closedown();
+
+   return EXIT_SUCCESS;
+}
+
+/******************************************************************************/

@@ -1,0 +1,551 @@
+/*******************************************************************************
+
+File        : c.main
+
+Date        : Saturday 5th June 2021
+
+Author      : Gavin Cawley
+
+Description : Part of a demonstration of collaborative tasks, where one program
+              provides a pane for a second wimp task, which communicate with
+              each other such that it appears to be a single task.
+
+History     : 06/06/2021 - v1.00 adapted from !animation1
+
+*******************************************************************************/
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+                 
+#include "alarm.h"
+#include "bbc.h"
+#include "wimp.h"
+#include "wimpt.h"
+#include "resspr.h"
+#include "baricon.h"
+#include "res.h"
+#include "event.h"
+#include "menu.h"
+#include "dbox.h"
+#include "werr.h"
+#include "win.h"
+#include "template.h"
+#include "font.h"
+#include "colourtran.h"
+   
+#define APP_NAME "Animation"
+#define MENU_ITEMS ">Info,Quit"
+                    
+#define IMENU_INFO 1
+#define IMENU_QUIT 2
+
+menu imenu;
+
+wimp_w gui_handle;
+
+wimp_t client = 0;
+
+typedef struct
+{      
+   double x, y, r, dx, dy;
+}
+Circle;    
+
+typedef struct
+{         
+   int x0, y0, x1, y1;
+}
+Rectangle;         
+                        
+#define CIRCLES (16)
+
+Circle circle[CIRCLES];
+                                                      
+Rectangle redraw;
+
+int then;
+
+wimp_openstr current;
+
+BOOL paused = FALSE;
+
+BOOL between(int x, int min, int max)
+{
+   return (x >= min) && (x <= max);
+}                     
+
+int sqrdist(int x0, int y0, int x1, int y1)
+{
+   return (x1 - x0)*(x1 - x0) + (y1 - y0)*(y1 - y0);
+}
+
+/*******************************************************************************
+
+Function    : intersects
+
+Parameters  : Circle    *c - pointer to a Circle struct
+              Rectangle *r - pointer to a Rectangle struct
+
+Returns     : BOOL
+
+Description : Returns TRUE if an intersection or overlap exists between the
+              specified Circle and Rectangle.  Uses the algorithm documented
+              in [1].
+
+*******************************************************************************/                                                                          
+BOOL intersects(Circle *c, Rectangle *r)
+{              
+   int cx = (int)c->x, cy = (int)c->y, cr = (int)c->r;
+                      
+   if (between(cx, r->x0-cr, r->x1+cr) && between(cy, r->y0, r->y1))
+   {                                 
+      return TRUE;
+   }
+
+   if (between(cx, r->x0, r->x1) && between(cy, r->y0-cr, r->y1+cr))
+   {                                 
+      return TRUE;
+   }
+               
+   int rsqr = cr*cr;
+                                       
+   if (sqrdist(cx, cy, r->x0, r->y0) <= rsqr)
+   {
+      return TRUE;
+   }
+    
+   if (sqrdist(cx, cy, r->x0, r->y1) <= rsqr)
+   {
+      return TRUE;
+   }
+
+   if (sqrdist(cx, cy, r->x1, r->y0) <= rsqr)
+   {
+      return TRUE;
+   }
+
+   if (sqrdist(cx, cy, r->x1, r->y1) <= rsqr)
+   {
+      return TRUE;
+   }
+
+   return FALSE;
+}
+
+void gui_redraw(wimp_w handle)
+{
+   BOOL more;
+ 
+   wimp_redrawstr r;
+
+   r.w = handle;
+
+   wimpt_noerr(wimp_redraw_wind(&r, &more));   
+            
+   while(more)
+   {           
+      // screen co-ordinates of the work area origin
+                                                          
+      int x = r.box.x0 - r.scx;
+      int y = r.box.y1 - r.scy;          
+
+      // work-area coordinates of the update rectangle
+
+      redraw.x0 = r.g.x0 - r.box.x0 + r.scx;
+      redraw.y0 = r.g.y0 - r.box.y1 + r.scy;
+      redraw.x1 = r.g.x1 - r.box.x0 + r.scx;
+      redraw.y1 = r.g.y1 - r.box.y1 + r.scy;
+
+      // work out which circles to redraw
+          
+      wimp_paletteword entry;
+
+      int gcol;                                         
+
+      entry.bytes.red   = 0x00;
+      entry.bytes.green = 0x00;
+      entry.bytes.blue  = 0xFF;
+
+      colourtran_setGCOL(entry, 0x00, 0x00, &(gcol));
+
+      for (int i = 0; i < CIRCLES; i++)
+      {  
+         if (intersects(&circle[i], &redraw))
+         {
+            bbc_circle(x + (int)circle[i].x, 
+                       y + (int)circle[i].y, 
+                       (int)circle[i].r);
+         }
+      }
+                                         
+      // see if there is another rectange to redraw
+
+      wimp_get_rectangle(&r, &more);
+   }        
+}
+
+BOOL gui_resized(wimp_openstr *openstr)
+{               
+   if ((openstr->box.x1 - openstr->box.x0) != (current.box.x1 - current.box.x0))
+   {
+      return TRUE;
+   }
+
+   if ((openstr->box.y1 - openstr->box.y0) != (current.box.y1 - current.box.y0))
+   {
+      return TRUE;
+   }
+
+   return FALSE;
+}
+
+void gui_closeDown(void)
+{                                           
+   if (client != 0)
+   {
+      wimp_msgstr msg;
+
+      msg.hdr.size      = 256;
+      msg.hdr.your_ref  = 0;
+      msg.hdr.action    = (wimp_msgaction)0xDEAD;
+      msg.data.words[0] = gui_handle;
+
+      wimp_sendmessage(wimp_ESEND, &msg, client);
+   }
+}
+
+void gui_force_redraw(void)
+{
+   wimp_redrawstr r;
+
+   r.w      = gui_handle;
+   r.box.x0 = 0;
+   r.box.y0 = -1024;
+   r.box.x1 = +1024;
+   r.box.y1 = 0;
+
+   wimp_force_redraw(&r);
+}
+
+void gui_update(int now, void *handle)
+{                        
+   double delta = 0.01*alarm_timedifference(then, now);
+
+   // update each circle in turn
+
+   for (int i = 0; i < CIRCLES; i++)
+   {                          
+      circle[i].x = circle[i].x + delta*circle[i].dx;
+      circle[i].y = circle[i].y + delta*circle[i].dy;
+
+      if (circle[i].x - circle[i].r < 0.0)
+      {                       
+         if (circle[i].dx < 0)
+         {
+            circle[i].dx = -circle[i].dx;
+         }
+      }
+      
+      if (circle[i].x + circle[i].r > 1024.0)
+      {                       
+         if (circle[i].dx > 0)
+         {
+            circle[i].dx = -circle[i].dx;
+         }
+      }
+
+      if (circle[i].y - circle[i].r < -1024.0)
+      {                       
+         if (circle[i].dy < 0)
+         {
+            circle[i].dy = -circle[i].dy;
+         }
+      }
+
+      if (circle[i].y + circle[i].r > 0)
+      {                       
+         if (circle[i].dy > 0)
+         {
+            circle[i].dy = -circle[i].dy;
+         }
+
+      } 
+   }
+                         
+   // force redraw of window
+
+   gui_force_redraw();
+                                              
+   // reset alarm
+
+   if (paused == FALSE)
+   {
+      alarm_set(now + 2, gui_update, NULL);
+
+      then = now;
+   }
+}
+
+void gui_open(wimp_openstr *openstr)
+{  
+   if (gui_resized(openstr))
+   {
+      current.box.x0 = openstr->box.x0;
+      current.box.y0 = openstr->box.y0;
+      current.box.x1 = openstr->box.x1;
+      current.box.y1 = openstr->box.y1;
+
+      wimp_msgstr msg;
+
+      msg.hdr.size      = 256;
+      msg.hdr.your_ref  = 0;
+      msg.hdr.action    = (wimp_msgaction)0xD00D;
+      msg.data.words[0] = current.box.x0;
+      msg.data.words[1] = current.box.y0;
+      msg.data.words[2] = current.box.x1;
+      msg.data.words[3] = current.box.y1;    
+
+      wimp_sendmessage(wimp_ESEND, &msg, client);
+   }
+   
+   wimpt_noerr(wimp_open_wind(openstr));
+}
+
+void gui_eventHandler(wimp_eventstr *e, void *handle)
+{
+   switch(e->e)
+   {
+      case wimp_EREDRAW:
+      {
+         gui_redraw(e->data.o.w);
+      
+         break;
+      }
+      case wimp_EOPEN:   // maximise or minimise window 
+      {
+         gui_open(&(e->data.o));
+      
+         break;
+      }
+      case wimp_ECLOSE:   // close window
+      {
+         wimpt_noerr(wimp_close_wind(e->data.o.w));
+
+         paused = TRUE;
+       
+         break;
+      }
+   }
+}
+
+void gui_create(void)
+{                        
+   wimp_wind *window = template_syshandle("Window");
+
+   if (window == 0)
+   {
+      exit(EXIT_FAILURE);
+   }
+
+   if (wimpt_complain(wimp_create_wind(window, &gui_handle)) != 0)
+   {
+      exit(EXIT_FAILURE);
+   }
+
+   win_register_event_handler(gui_handle, gui_eventHandler, 0);
+
+   // initialise circles
+
+   for (int i = 0; i < CIRCLES; i++)
+   {             
+      double velocity   = (double)(256 - rand()%768);
+      double direction  = 2*3.14159*rand()/(double)RAND_MAX;
+
+      circle[i].x       = (double)+512;
+      circle[i].y       = (double)-512;
+      circle[i].r       = (double)(32  + rand()%64);                                  
+      circle[i].dx      = velocity*cos(direction);
+      circle[i].dy      = velocity*sin(direction);
+   }                 
+
+   // get initial window configuration
+
+   wimp_wstate p_state;
+
+   if (wimpt_complain(wimp_get_wind_state(gui_handle, &p_state)) == 0)
+   {
+      current.w = gui_handle;
+      current.box.x0  = p_state.o.box.x0;
+      current.box.y0  = p_state.o.box.y0;
+      current.box.x1  = p_state.o.box.x1;
+      current.box.y1  = p_state.o.box.y1;
+      current.x       = p_state.o.x;
+      current.y       = p_state.o.y;                                              
+   }
+
+   // start animation
+
+   paused = FALSE;
+
+   then = alarm_timenow();
+
+   alarm_set(then + 2, gui_update, NULL);
+}   
+
+static void info_about(void)
+{
+   dbox d = dbox_new("ProgInfo");
+
+   if (d != NULL)
+   {
+      dbox_show(d);        
+      dbox_fillin(d);       
+      dbox_dispose(&d);     
+   }
+}
+
+static menu ipremenuproc(void *handle)
+{
+   return imenu;
+}
+
+static void imenuproc(void *handle, char *hit)
+{
+   switch (hit[0])  
+   {                
+      case IMENU_INFO:
+      {
+         info_about();
+
+         break;
+      }
+      case IMENU_QUIT:
+      {
+         gui_closeDown();
+
+         exit(EXIT_SUCCESS);
+
+         break;
+      }
+   }
+}
+
+static void icon_left_click(wimp_i icon)
+{     
+   // pane can only be opened by the client wimp task
+}
+
+/*******************************************************************************
+
+Function    : messageEventProcessor
+
+Parameters  : wimp_eventstr* - pointer to struct describing the event
+              void*          - pointer to workspace (currently unused)
+
+Returns     : BOOL - TRUE if event fully handled, FALSE otherwise.
+
+Description : Task-level event processor.  In this case it responds to user
+              wimp messages sent by other tasks.
+
+*******************************************************************************/
+
+BOOL messageEventProcessor(wimp_eventstr *e, void *handle)
+{
+   if (e->e == wimp_ESEND)
+   {            
+      switch (e->data.msg.hdr.action)
+      {           
+         case 0xBEEF:   // request for pane handle
+         {
+            wimp_msgstr msg;
+
+            msg.hdr.size      = 256;
+            msg.hdr.your_ref  = 0;
+            msg.hdr.action    = (wimp_msgaction)0xBEEF;
+            msg.data.words[0] = gui_handle;                          
+
+            client = e->data.msg.hdr.task;
+
+            wimp_sendmessage(wimp_ESEND, &msg, client);
+
+            return TRUE;
+         }  
+         case 0xFACE:   // pause-play request
+         {
+            paused = e->data.msg.data.words[0] == 'l' ? TRUE : FALSE;
+
+            if (paused == FALSE)
+            {
+               then = alarm_timenow();
+
+               alarm_set(then + 2, gui_update, NULL);
+            }
+
+            return TRUE;
+         }                    
+      }
+   }
+   else if (e->e == wimp_ESEND)
+   {
+   }
+
+   return FALSE;
+}
+
+int main(void)
+{                  
+   // clear logfile
+    
+   FILE *fd = fopen("<Animation$Dir>.logfile", "w"); fclose(fd);
+                   
+   wimpt_init(APP_NAME);
+
+   res_init(APP_NAME);   
+
+   template_init();              
+
+   dbox_init();     
+
+   alarm_init();
+
+   gui_create();
+
+   baricon("!animation", (int)resspr_area(), icon_left_click);
+
+   imenu = menu_new(APP_NAME, MENU_ITEMS);
+                    
+   if (imenu == NULL)
+   {
+      return EXIT_FAILURE;
+   }
+
+   if (!event_attachmenumaker(win_ICONBAR, ipremenuproc, imenuproc, 0))
+   {
+      return EXIT_FAILURE;
+   }                    
+
+   // register icon menu and middle click handler 
+
+   if (!event_attachmenumaker(win_ICONBAR, ipremenuproc, imenuproc, 0))
+   {
+      return FALSE;
+   }               
+
+   win_add_unknown_event_processor(messageEventProcessor, NULL);
+
+   // main even processing loop
+
+   while (TRUE) 
+   {
+      event_process();
+   }
+                    
+   gui_closeDown();
+
+   wimp_closedown();
+
+   return EXIT_SUCCESS;
+}
+
+/******************************************************************************/
